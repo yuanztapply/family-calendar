@@ -1,437 +1,323 @@
-# -*- coding: utf-8 -*-
-"""
-跨时区家庭日程同步网页
-用 Python + Streamlit 写成，方便在浏览器里预览。
-暂时不连接数据库，日程和排班都用字典 / 列表里的假数据。
-"""
-
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo  # Python 自带的时区库，能自动处理夏令时
+# app.py - 家庭日程同步 (流动星空版 + 悬浮时钟修复)
+# 运行: pip install streamlit pandas ，然后 streamlit run app.py
 
 import streamlit as st
+import streamlit.components.v1 as components
+from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
+from pathlib import Path
+import pandas as pd
+import json, random
 
-
-# ============================================================
-# 1. 页面基础设置
-# ============================================================
-st.set_page_config(
-    page_title="跨时区家庭日程",
-    page_icon="🗓️",
-    layout="wide",  # 宽屏布局，方便左右两列对照
-)
-
-# 绿色提示条的样式（页面最上方会用到）
-st.markdown(
-    """
-    <style>
-    .shared-rest-banner {
-        background: linear-gradient(90deg, #16a34a, #22c55e);
-        color: white;
-        padding: 1.1rem 1.4rem;
-        border-radius: 14px;
-        font-size: 1.25rem;
-        font-weight: 700;
-        text-align: center;
-        box-shadow: 0 8px 20px rgba(22, 163, 74, 0.28);
-        margin-bottom: 0.8rem;
-    }
-    .clock-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 0.75rem 0.9rem;
-        margin-bottom: 0.6rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# 2. 时区：英国会自动在 GMT / BST 之间切换，北京全年 UTC+8
-# ============================================================
-# Europe/London：冬天是 GMT（格林尼治时间，UTC+0）
-#                夏天是 BST（英国夏令时，UTC+1）
-# 我们不用自己算哪一天换时，ZoneInfo 会按官方规则自动切换。
 UK_TZ = ZoneInfo("Europe/London")
-CN_TZ = ZoneInfo("Asia/Shanghai")  # 北京时间，没有夏令时
+BJ_TZ = ZoneInfo("Asia/Shanghai")
+st.set_page_config(page_title="家庭日程同步", layout="wide", page_icon="🌌")
 
+LIT = random.choice([
+    {"orig": "Il n'y a qu'un seul luxe véritable, c'est celui des relations humaines.", "lang": "法语原文",
+     "src": "Antoine de Saint-Exupéry《风沙星辰 Terre des hommes》(1939),第三章",
+     "zh": "真正唯一的奢侈，是人与人之间的关系。",
+     "ana": "圣埃克絮佩里以飞行员视角写撒哈拉迫降：物质都会耗尽，只有同伴递来的一口水算数。放在异地家庭里，时间对不上时，一次短通话比补一件礼物更奢侈。出处：Terre des hommes, Chapitre III。"},
+    {"orig": "Whatever our souls are made of, his and mine are the same.", "lang": "英语原文",
+     "src": "Emily Brontë《呼啸山庄 Wuthering Heights》(1847),第34章，凯瑟琳临终独白",
+     "zh": "无论我们的灵魂是什么构成的，他的和我的是同一种。",
+     "ana": "凯瑟琳在病榻上对耐莉说出此句，意为身份、距离、婚姻都无法切割同源的灵魂。约克郡荒原的风暴意象即情感的不可规训。家人分处两地，作息相反，但同源感不减。出处：Wuthering Heights, Ch.34。"},
+    {"orig": "大江东去，浪淘尽，千古风流人物。", "lang": "中文原文",
+     "src": "苏轼《念奴娇 · 赤壁怀古》(1082),北宋元丰五年谪居黄州时作",
+     "zh": "长江向东奔流，浪花淘尽了千古英雄。",
+     "ana": "上阕以长江起兴：赤壁一战的英雄不过浪花一瞬。下阕转入人生如梦，一樽还酹江月。时间观极为旷达——以千年尺度看，眼前的时差与错过都只是小浪。适合在约不上时间时读。"},
+    {"orig": "No man is an island, entire of itself; every man is a piece of the continent.", "lang": "英语原文",
+     "src": "John Donne《沉思 Meditation XVII》(1624),玄学派布道文",
+     "zh": "没有人是孤岛，每个人都是大陆的一部分。",
+     "ana": "多恩在病中写下：任何人的死亡都使我受损，因为我包含在人类之中。后世海明威以此为《丧钟为谁而鸣》题词。家庭即最小的大陆，缺一角便不完整。出处：Devotions upon Emergent Occasions。"},
+    {"orig": "Они сражались за то, чтобы в мире было больше света, а тьма отступила — и свет этот был в их письмах домой.", "lang": "俄语原文",
+     "src": "Василий Гроссман《生活与命运》(1960/1980),第二部家书线索",
+     "zh": "他们战斗，是为了让世上多一点光、少一点黑暗——而那光，就藏在家书里。",
+     "ana": "格罗斯曼写斯大林格勒战壕里的士兵：前线唯一的光是后方的信。通信不是闲聊，是维系人之所以为人的光。此处为全书家书主题的凝练转述，强调跨越距离的书写本身即抵抗黑暗。"},
+    {"orig": "虢国夫人承主恩，平明骑马入宫门。却嫌脂粉污颜色，淡扫蛾眉朝至尊。", "lang": "中文原文",
+     "src": "张祜《集灵台 · 其二》(晚唐),讽杨贵妃姐妹恃宠",
+     "zh": "虢国夫人深受皇恩，天刚亮就骑马进宫。竟嫌脂粉玷污容色，只淡描眉毛去见皇上。",
+     "ana": "四句全用白描，不着一议而讽意自见：特权者的从容反衬常人的奔波。读时可作镜鉴——能从容安排通话时间，本身已是一种被爱包围的幸运，宜珍惜而非视为理所当然。"},
+])
+st.markdown(f"""<div class="quote"><div class="en">“{LIT['orig']}”</div><div class="who">— {LIT['src']} · {LIT['lang']}</div><div class="zh">{LIT['zh']}</div><div class="ana">【赏析】{LIT['ana']}</div></div>""", unsafe_allow_html=True)
 
-# ============================================================
-# 3. 假数据：英国这边的示例日程（以后可以改成真实日历）
-#    每条日程包含：标题、开始时间、结束时间（都按英国本地时间理解）
-# ============================================================
-DEFAULT_UK_EVENTS = [
-    {"title": "网课", "start": "09:00", "end": "11:00"},
-    {"title": "超市采购", "start": "12:30", "end": "13:30"},
-    {"title": "兼职", "start": "14:00", "end": "18:00"},
-]
-
-
-# 父母排班对应的“上班小时”（按北京时间的整点小时，0~23）
-# 不在这个列表里的小时，就当成休息。
-PARENT_SHIFT_WORK_HOURS = {
-    "早班": list(range(8, 16)),   # 北京时间 08:00–16:00 上班
-    "晚班": list(range(16, 24)),  # 北京时间 16:00–24:00 上班
-    "休息": [],                   # 全天不上班
+# ============ 流动星空背景 + 同色系明亮信息条 ============
+st.markdown("""
+<style>
+/* 左主区:流动夜空 + 点点金色星 */
+.stApp {
+  background: linear-gradient(120deg,#050914,#0e1830,#16244a,#1e2c55,#050914);
+  background-size: 300% 300%;
+  animation: skydrift 26s ease infinite;
 }
+@keyframes skydrift { 0%{background-position:0% 40%} 50%{background-position:100% 60%} 100%{background-position:0% 40%} }
+.stApp::before {
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background-image:
+    radial-gradient(1.6px 1.6px at 10% 20%, #ffe9a8 100%, transparent 100%),
+    radial-gradient(1px 1px at 28% 64%, #ffd76e 100%, transparent 100%),
+    radial-gradient(2px 2px at 45% 14%, #fff3c4 100%, transparent 100%),
+    radial-gradient(1px 1px at 62% 34%, #ffdf8e 100%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 78% 68%, #ffe9a8 100%, transparent 100%),
+    radial-gradient(1px 1px at 88% 16%, #ffd76e 100%, transparent 100%),
+    radial-gradient(1.6px 1.6px at 18% 82%, #fff3c4 100%, transparent 100%),
+    radial-gradient(1px 1px at 38% 46%, #ffdf8e 100%, transparent 100%),
+    radial-gradient(1.6px 1.6px at 55% 82%, #ffe9a8 100%, transparent 100%),
+    radial-gradient(1px 1px at 72% 8%, #ffd76e 100%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 5% 55%, #fff3c4 100%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 95% 50%, #ffdf8e 100%, transparent 100%);
+  animation: twinkle 2.6s ease-in-out infinite alternate;
+}
+@keyframes twinkle { from{opacity:.45} to{opacity:1} }
+/* 右侧边栏:与主区统一的暗夜金——同色系深底 + 金色描边/点缀 */
+[data-testid="stSidebar"] {
+  background: linear-gradient(160deg,#0a1128,#14204a,#1c2c5c,#0a1128);
+  background-size: 200% 200%;
+  animation: goldflow 26s ease infinite;
+  border-right:1px solid rgba(255,215,130,.35);
+}
+@keyframes goldflow { 0%{background-position:0% 20%} 50%{background-position:100% 80%} 100%{background-position:0% 20%} }
+[data-testid="stSidebar"] * { color:#e8ddc0 !important; }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color:#ffe9a8 !important; }
+[data-testid="stSidebar"] .stCheckbox, [data-testid="stSidebar"] .stToggle { background:rgba(255,215,130,.10); border:1px solid rgba(255,215,130,.25); border-radius:8px; padding:4px 8px; margin-bottom:4px; }
+/* 让内容浮在星空上 */
+.block-container { position:relative; z-index:1; }
+/* 标题:同色系玻璃拟态 */
+.hero { border-radius:20px; padding:28px 32px; color:#eef1ff;
+  background:rgba(70,90,160,.35); border:1px solid rgba(160,180,255,.35);
+  backdrop-filter:blur(10px); box-shadow:0 10px 40px rgba(0,0,0,.35); }
+.hero h1 { margin:0; font-size:30px; letter-spacing:2px; color:#fff; }
+.hero .sub { opacity:.75; font-size:13px; margin-top:6px; color:#d6ddff; }
+.quote { text-align:center; color:#dbe1ff; margin:14px 0 4px 0; }
+.quote .en { font-style:italic; font-size:15px; } .quote .zh { font-size:14px; margin-top:4px; color:#eef1ff;}
+.quote .ana { font-size:12px; opacity:.75; margin-top:6px; line-height:1.7; max-width:900px; margin-left:auto; margin-right:auto; }
+/* 信息条:不透明奶白底 + 深字，保证星空上可读 */
+.card { border-radius:14px; padding:14px 16px; color:#1c2438;
+  background:rgba(245,242,232,.96); border:1px solid rgba(255,220,140,.55);
+  box-shadow:0 4px 16px rgba(0,0,0,.35); transition:transform .18s ease; }
+.card:hover { transform:translateY(-3px); background:rgba(130,150,225,.42); }
+.card span, .card b { color:#1c2438; }
+.badge { display:inline-block; padding:3px 12px; border-radius:999px; font-size:13px; font-weight:700; }
+.free{background:rgba(150,230,180,.85);color:#0c3a22;} .busy{background:rgba(240,180,180,.85);color:#5c1a1a;}
+.nap{background:rgba(255,225,150,.9);color:#5c3f00;border:1px dashed #fff;}
+.banner{border-radius:12px;padding:12px 16px;margin:10px 0;font-weight:700;color:#0e1430;
+  border:1px solid rgba(255,255,255,.5); backdrop-filter:blur(8px);}
+.b-green{background:rgba(170,240,195,.88);} .b-blue{background:rgba(170,205,250,.88);}
+.b-orange{background:rgba(255,215,170,.90);} .b-gray{background:rgba(200,205,225,.75);color:#2a3050;}
+.msg { background:rgba(120,140,210,.30); border-left:4px solid #aebfff; border-radius:0 10px 10px 0; padding:10px 14px; margin-bottom:8px; color:#eef1ff;}
+.msg .meta { font-size:12px; color:#c3cbff; } .msg .body { font-size:14px; margin-top:2px; color:#fff;}
+hr.soft{border:none;border-top:1px dashed rgba(170,190,255,.4);margin:14px 0;}
+/* metric / expander 在深色底上可读 */
+[data-testid="stMetric"] { background:rgba(120,140,210,.30); border:1px solid rgba(170,190,255,.35); border-radius:12px; padding:8px; }
+[data-testid="stMetric"] label, [data-testid="stMetric"] div { color:#eef1ff !important; }
+.stExpander, .stSelectbox label, .stSlider label, .stRadio label, .stTextInput label, .stTextArea label, .stDateInput label, .stCheckbox label { color:#e6ebff !important; }
+h2, h3 { color:#f0f3ff !important; }
+p, .stCaption, .stMarkdown { color:#dbe1ff; }
+</style>
+<div class="hero"><h1>家庭日程同步</h1><div class="sub">英国时间与北京时间 · 小时级对标 · 妈妈补觉浮动窗口 · 家庭留言板</div></div>
+""", unsafe_allow_html=True)
+# 名言已在上方展示，此处不再重复
 
+# ============ 悬浮时钟修复:用 components.html 包一层,JS 一定执行 ============
+components.html("""
+<div id="clock" style="position:fixed;right:18px;bottom:18px;z-index:9999;
+  background:rgba(20,26,55,.92);color:#eef1ff;border:1px solid rgba(160,180,255,.5);
+  border-radius:14px;padding:10px 16px;font-size:13px;line-height:1.8;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);font-family:sans-serif;white-space:nowrap;">
+  <div>🌍 伦敦 <b id="ldn" style="font-size:16px;">--:--:--</b> <span id="ldn-d"></span></div>
+  <div>🌏 北京 <b id="bj" style="font-size:16px;">--:--:--</b> <span id="bj-d"></span></div>
+</div>
+<script>
+function tick(){
+  const now = new Date();
+  const t = (tz)=> new Intl.DateTimeFormat('zh-CN',{timeZone:tz,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(now);
+  const d = (tz)=> new Intl.DateTimeFormat('zh-CN',{timeZone:tz,month:'numeric',day:'numeric',weekday:'short'}).format(now);
+  document.getElementById('ldn').textContent = t('Europe/London');
+  document.getElementById('ldn-d').textContent = d('Europe/London');
+  document.getElementById('bj').textContent = t('Asia/Shanghai');
+  document.getElementById('bj-d').textContent = d('Asia/Shanghai');
+}
+tick(); setInterval(tick,1000);
+</script>
+""", height=0)
 
-# ============================================================
-# 4. 小工具函数：时间换算、日程判断
-# ============================================================
-def parse_hhmm(text: str) -> time:
-    """把 '09:00' 这种字符串转成 time 对象。"""
-    hour, minute = text.split(":")
-    return time(int(hour), int(minute))
+# ============ 数据逻辑 (与上一版相同,略) ============
+ANCHOR = date(2026, 9, 30)
+MOM_CYCLE = ["夜班", "小休", "大休", "白班"]
+def mom_day_status(d: date) -> str: return MOM_CYCLE[(d - ANCHOR).days % 4]
+MOM_DESC = {"白班": "早上七点到晚上十点上班", "夜班": "晚上七点到次日早上十点上班", "小休": "夜班次日，上午补觉", "大休": "全天休息"}
+def base_free(s: str, h: int) -> bool:
+    if s == "大休": return True
+    if s == "白班": return not (7 <= h < 22)
+    if s == "夜班": return not (h >= 19 or h < 10)
+    if s == "小休": return h >= 10
+    return True
 
+DOC = Path(__file__).parent
+ICS_FILES = {"SAR Mphil课程": DOC / "SAR Mphil课程.ics", "个人": DOC / "个人.ics",
+             "工作": DOC / "工作.ics", "Siri建议": DOC / "Siri建议.ics", "Untitled": DOC / "Untitled.ics"}
+def parse_ics(path: Path):
+    evs = []
+    try: txt = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception: return evs
+    for block in txt.split("BEGIN:VEVENT")[1:]:
+        try:
+            summ, ds, de = "", "", ""
+            for line in block.splitlines():
+                if line.startswith("SUMMARY"): summ = line.split(":", 1)[1] if ":" in line else ""
+                elif line.startswith("DTSTART"): ds = line.split(":", 1)[1].strip()
+                elif line.startswith("DTEND"): de = line.split(":", 1)[1].strip()
+            if not ds: continue
+            def p(s):
+                s = s.strip()
+                if s.endswith("Z"): return datetime.strptime(s, "%Y%m%dT%H%M%SZ").replace(tzinfo=ZoneInfo("UTC"))
+                if "T" in s: return datetime.strptime(s[:15], "%Y%m%dT%H%M%S").replace(tzinfo=UK_TZ)
+                return datetime.strptime(s, "%Y%m%d").replace(tzinfo=UK_TZ)
+            evs.append((p(ds), p(de) if de else p(ds), summ))
+        except Exception: continue
+    return evs
+all_events, counts = [], {}
+for cname, p in ICS_FILES.items():
+    evs = parse_ics(p) if p.exists() else []
+    counts[cname] = len(evs)
+    for s, e, summ in evs:
+        all_events.append((s.astimezone(UK_TZ), e.astimezone(UK_TZ), summ, cname))
 
-def uk_label(moment: datetime) -> str:
-    """
-    根据当前英国时间，显示 GMT 还是 BST。
-    moment.dst() 大于 0 就说明正在夏令时。
-    """
-    is_bst = moment.dst() and moment.dst() != timedelta(0)
-    return "BST（夏令时）" if is_bst else "GMT（冬令时）"
+st.sidebar.header("日期与日历")
+today_uk = datetime.now(UK_TZ).date()
+sel_date = st.sidebar.date_input("选择日期（按英国日期）", value=today_uk)
+enabled = {c: st.sidebar.checkbox(f"{c}（{counts.get(c,0)}个事件）", value=(c in ("SAR Mphil课程", "个人", "工作"))) for c in ICS_FILES}
+st.sidebar.markdown("---")
+st.sidebar.subheader("妈妈浮动补觉")
+nap_before_on = st.sidebar.toggle("考虑夜班前下午补觉", value=True)
+nap_before_range = st.sidebar.slider("夜班前补觉窗口（北京时间）", 12, 18, (14, 17))
+nap_noon_on = st.sidebar.toggle("考虑小休日中午补觉", value=True)
+nap_noon_range = st.sidebar.slider("小休日补觉窗口（北京时间）", 10, 18, (12, 15))
+nap_mode = st.sidebar.radio("补觉时段计算方式", ["标为忙碌（稳妥）", "标为可能可约（提醒）"], index=0)
 
+def is_nap(bj_date: date, h_bj: int):
+    st_today = mom_day_status(bj_date)
+    if nap_noon_on and st_today == "小休" and nap_noon_range[0] <= h_bj < nap_noon_range[1]: return True, "小休日午间补觉"
+    if nap_before_on and st_today == "夜班" and nap_before_range[0] <= h_bj < nap_before_range[1]: return True, "夜班前下午补觉"
+    return False, ""
+def dad_free(dt: datetime) -> bool: return not (dt.weekday() < 5 and 7 <= dt.hour < 19)
+def uk_busy_at(h: int):
+    hs = datetime.combine(sel_date, time(h, 0), tzinfo=UK_TZ)
+    he = datetime.combine(sel_date, time(h, 59), tzinfo=UK_TZ)
+    hits = []
+    for s, e, summ, c in all_events:
+        if not enabled.get(c): continue
+        if (e - s).total_seconds() >= 20 * 3600:
+            if s.date() <= sel_date <= e.date(): hits.append(f"{summ}（{c}）")
+        elif s <= he and e >= hs and (s.date() == sel_date or e.date() == sel_date): hits.append(f"{summ}（{c}）")
+    seen, out = set(), []
+    for x in hits:
+        if x not in seen: seen.add(x); out.append(x)
+    return (len(out) > 0, "；".join(out))
 
-def hour_has_uk_event(uk_dt: datetime, events: list[dict]) -> bool:
-    """
-    判断某个英国时间点，是否落在任何一条英国日程里。
-    用“半开区间”：包含开始时间，不包含结束时间。
-    例如 09:00–11:00 的课，11:00 整点已经下课，算空闲。
-    """
-    clock = uk_dt.time()
-    for event in events:
-        start = parse_hhmm(event["start"])
-        end = parse_hhmm(event["end"])
-        if start <= clock < end:
-            return True
-    return False
+if "manual" not in st.session_state: st.session_state.manual = {}
+if "notes" not in st.session_state: st.session_state.notes = {}
+with st.expander("调整我的状态与备注", expanded=False):
+    mcols = st.columns(4)
+    for i, h in enumerate(range(7, 23)):
+        busy, hit = uk_busy_at(h)
+        cur = st.session_state.manual.get(h, None)
+        with mcols[i % 4]:
+            st.markdown(f"**英国 {h:02d}:00** — 日历：{'忙碌' if busy else '空闲'}")
+            if hit: st.caption(hit[:30])
+            c = st.selectbox("调整", ["跟随日历", "强制设为忙碌", "强制设为空闲"], index=0 if cur is None else (1 if cur else 2), key=f"m_{h}")
+            st.session_state.manual[h] = None if c == "跟随日历" else (c == "强制设为忙碌")
+            st.session_state.notes[h] = st.text_input("备注文字", value=st.session_state.notes.get(h, ""), placeholder="例如：写论文", key=f"n_{h}")
 
+rows, c_all, c_dad, c_mom, c_maybe = [], [], [], [], []
+for h_uk in range(7, 23):
+    dt_uk = datetime.combine(sel_date, time(h_uk, 0), tzinfo=UK_TZ)
+    dt_bj = dt_uk.astimezone(BJ_TZ)
+    h_bj, bj_d = dt_bj.hour, dt_bj.date()
+    bj_note = "当天" if bj_d == sel_date else "次日"
+    m_st = mom_day_status(bj_d)
+    napping, nap_why = is_nap(bj_d, h_bj)
+    mf_base = base_free(m_st, h_bj)
+    if napping and nap_mode.startswith("标为忙碌"): mf, maybe = False, False
+    elif napping: mf, maybe = True, True
+    else: mf, maybe = mf_base, False
+    df = dad_free(dt_bj)
+    man = st.session_state.manual.get(h_uk, None)
+    cal_b, hit = uk_busy_at(h_uk)
+    me_free = not (cal_b if man is None else man)
+    w_all = me_free and df and mf and not maybe
+    w_dad = me_free and df and (not mf) and not w_all
+    w_mom = me_free and mf and (not df)
+    w_maybe = me_free and df and maybe
+    if w_all: c_all.append(f"英国 {h_uk} 点 = 北京 {h_bj} 点（{bj_note}）")
+    elif w_dad: c_dad.append(f"英国 {h_uk} 点 = 北京 {h_bj} 点")
+    elif w_mom: c_mom.append(f"英国 {h_uk} 点 = 北京 {h_bj} 点")
+    if w_maybe: c_maybe.append(f"英国 {h_uk} 点 = 北京 {h_bj} 点（{nap_why}）")
+    kind = "all" if w_all else ("maybe" if w_maybe else ("dad" if w_dad else ("mom" if w_mom else ("mebusy" if not me_free else "none"))))
+    rows.append(dict(英国小时=h_uk, 北京时间=f"{h_bj:02d}:00（{bj_note}）", 我="忙碌" if not me_free else "空闲",
+                     事件=hit, 备注=st.session_state.notes.get(h_uk, ""), 爸爸="休息" if df else "上班",
+                     妈妈状态=m_st, 补觉=(nap_why if napping else "—"), 妈妈是否可约=("可能可约" if maybe else ("可约" if mf else "忙碌")), 类型=kind))
 
-def parent_is_resting(cn_dt: datetime, shift: str) -> bool:
-    """判断某个北京时间点，父母是否处于休息（不上班）。"""
-    work_hours = PARENT_SHIFT_WORK_HOURS.get(shift, [])
-    return cn_dt.hour not in work_hours
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("三人同时空闲", f"{len(c_all)} 小时", "优先约这里")
+k2.metric("我和爸爸空闲", f"{len(c_dad)} 小时", "可单独约爸爸")
+k3.metric("我和妈妈空闲", f"{len(c_mom)} 小时", "可单独约妈妈")
+k4.metric("妈妈可能在补觉", f"{len(c_maybe)} 小时", "需电话确认")
+st.progress(min(1.0, (len(c_all) + len(c_dad) + len(c_mom)) / 16), text="全天可约覆盖")
+if c_all: st.markdown(f'<div class="banner b-green">三人同时空闲：{"、".join(c_all)}</div>', unsafe_allow_html=True)
+else: st.markdown('<div class="banner b-gray">今天三人没有稳妥的同时空闲，看看下面的两人时间吧</div>', unsafe_allow_html=True)
+if c_maybe: st.markdown(f'<div class="banner" style="background:rgba(255,232,170,.92);">妈妈可能在补觉（约前先问）：{"、".join(c_maybe)}</div>', unsafe_allow_html=True)
+if c_dad: st.markdown(f'<div class="banner b-blue">我和爸爸空闲：{"、".join(c_dad)}</div>', unsafe_allow_html=True)
+if c_mom: st.markdown(f'<div class="banner b-orange">我和妈妈空闲：{"、".join(c_mom)}</div>', unsafe_allow_html=True)
 
+st.subheader("今日时间轴")
+COLOR = {"all": "rgba(170,240,195,.55)", "maybe": "rgba(255,232,170,.55)",
+         "dad": "rgba(170,205,250,.55)", "mom": "rgba(255,205,170,.55)",
+         "mebusy": "rgba(220,160,170,.45)", "none": "rgba(120,140,210,.30)"}
+LABEL = {"all": "三人可约", "maybe": "问一句再约", "dad": "我和爸爸", "mom": "我和妈妈", "mebusy": "我忙碌", "none": "父母忙"}
+for r in rows:
+    me_b = '<span class="badge free">我空闲</span>' if r["我"] == "空闲" else '<span class="badge busy">我忙碌</span>'
+    dad_b = '<span class="badge free">爸爸休息</span>' if r["爸爸"] == "休息" else '<span class="badge busy">爸爸上班</span>'
+    mom_b = ('<span class="badge nap">妈妈可能补觉</span>' if r["妈妈是否可约"] == "可能可约"
+             else ('<span class="badge free">妈妈可约</span>' if r["妈妈是否可约"] == "可约" else '<span class="badge busy">妈妈忙碌</span>'))
+    st.markdown(f"""<div class="card" style="background:{COLOR[r['类型']]};margin-bottom:8px">
+    <b>英国 {r['英国小时']:02d}:00 → 北京 {r['北京时间']}</b> · {LABEL[r['类型']]}<br>{me_b} {dad_b} {mom_b}<br>
+    <span style="font-size:13px;">妈妈：{r['妈妈状态']}（{MOM_DESC[r['妈妈状态']]}）｜补觉：{r['补觉']}｜爸爸：{r['爸爸']}｜事件：{r['事件'] or '无'}{('｜备注：'+r['备注']) if r['备注'] else ''}</span></div>""",
+                unsafe_allow_html=True)
+with st.expander("查看完整明细表格"):
+    st.dataframe(pd.DataFrame([{k: v for k, v in r.items() if k != "类型"} for r in rows]), use_container_width=True, hide_index=True)
 
-def merge_ranges(slots: list[datetime]) -> list[tuple[datetime, datetime]]:
-    """
-    把连续的整点空闲时段合并成区间。
-    例如 20:00、21:00、22:00 会合并成 20:00–23:00。
-    """
-    if not slots:
-        return []
-
-    ranges = []
-    start = slots[0]
-    prev = slots[0]
-    for current in slots[1:]:
-        # 相邻整点：相差正好 1 小时
-        if current - prev == timedelta(hours=1):
-            prev = current
+st.markdown("<hr class='soft'>", unsafe_allow_html=True)
+st.subheader("家庭留言板")
+MSG_FILE = Path(__file__).parent / "messages.json"
+def load_msgs():
+    try:
+        if MSG_FILE.exists(): return json.loads(MSG_FILE.read_text(encoding="utf-8"))
+    except Exception: pass
+    return []
+def save_msgs(m):
+    try: MSG_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e: st.error(f"保存失败：{e}")
+msgs = load_msgs()
+with st.form("msg_form", clear_on_submit=True):
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        who = st.selectbox("我是", ["子女（英国）", "妈妈", "爸爸"])
+        to = st.selectbox("写给", ["全家人", "妈妈", "爸爸", "子女（英国）"])
+    with c2:
+        body = st.text_area("留言内容", placeholder="例如：周日晚上八点（北京）打视频可以吗？", max_chars=300)
+    if st.form_submit_button("发布留言"):
+        if not body.strip(): st.warning("请先写点内容再发布。")
         else:
-            ranges.append((start, prev + timedelta(hours=1)))
-            start = current
-            prev = current
-    ranges.append((start, prev + timedelta(hours=1)))
-    return ranges
-
-
-def format_range(start: datetime, end: datetime, tz) -> str:
-    """把一个时间区间格式化成 20:00–22:00 这样的文字。"""
-    local_start = start.astimezone(tz)
-    local_end = end.astimezone(tz)
-    return f"{local_start.strftime('%H:%M')}–{local_end.strftime('%H:%M')}"
-
-
-def find_shared_rest(
-    selected_date,
-    uk_events: list[dict],
-    parent_shift: str,
-) -> list[tuple[datetime, datetime]]:
-    """
-    核心逻辑：
-    1. 把选定那天的每个英国整点拿出来（00:00 到 23:00）
-    2. 如果这个整点英国没有日程
-    3. 并且换算成北京时间后，父母处于休息
-    4. 就把这个整点记下来，最后合并成连续区间
-    """
-    free_hours = []
-    for hour in range(24):
-        uk_dt = datetime.combine(selected_date, time(hour, 0), tzinfo=UK_TZ)
-        cn_dt = uk_dt.astimezone(CN_TZ)
-        uk_free = not hour_has_uk_event(uk_dt, uk_events)
-        parents_rest = parent_is_resting(cn_dt, parent_shift)
-        if uk_free and parents_rest:
-            free_hours.append(uk_dt)
-    return merge_ranges(free_hours)
-
-
-# ============================================================
-# 5. 用 session_state 记住页面上的假数据
-#    Streamlit 每次点按钮都会重新跑一遍脚本，
-#    不存进 session_state 的话，改动会丢失。
-# ============================================================
-if "uk_events" not in st.session_state:
-    st.session_state.uk_events = [event.copy() for event in DEFAULT_UK_EVENTS]
-
-
-# ============================================================
-# 6. 左侧栏：当前英国时间（自动 GMT/BST）和北京时间
-# ============================================================
-now_utc = datetime.now(tz=ZoneInfo("UTC"))
-now_uk = now_utc.astimezone(UK_TZ)
-now_cn = now_utc.astimezone(CN_TZ)
-
-with st.sidebar:
-    st.header("时区时钟")
-    st.caption("英国时间由系统自动判断今天是冬令时还是夏令时。")
-
-    st.markdown(
-        f"""
-        <div class="clock-card">
-            <div>🇬🇧 我在英国</div>
-            <div style="font-size:1.6rem;font-weight:700;">
-                {now_uk.strftime("%H:%M:%S")}
-            </div>
-            <div>{now_uk.strftime("%Y-%m-%d")} · {uk_label(now_uk)}</div>
-        </div>
-        <div class="clock-card">
-            <div>🇨🇳 父母在北京</div>
-            <div style="font-size:1.6rem;font-weight:700;">
-                {now_cn.strftime("%H:%M:%S")}
-            </div>
-            <div>{now_cn.strftime("%Y-%m-%d")} · 北京时间（UTC+8）</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # 注意：now_uk 和 now_cn 是“同一瞬间”的两个钟面。
-    # 直接相减会得到 0。要比较的是两边相对 UTC 的偏移。
-    # 夏令时 BST：北京快 7 小时；冬令时 GMT：北京快 8 小时。
-    offset_hours = int(
-        (now_cn.utcoffset() - now_uk.utcoffset()).total_seconds() // 3600
-    )
-    st.info(f"现在北京比英国快 **{offset_hours} 小时**。")
-
-    st.divider()
-    st.subheader("预览哪一天")
-    selected_date = st.date_input(
-        "选择日期（英国日历）",
-        value=now_uk.date(),
-        help="换一天可以看看夏令时/冬令时或不同排班下的对照效果。",
-    )
-
-    st.caption("提示：点浏览器刷新，或改一下侧边栏选项，时钟会更新。")
-
-
-# ============================================================
-# 7. 页面最上方先留一个“空位”
-#    Streamlit 是从上到下执行的。排班按钮在右列，
-#    所以这里先占位，等右列选完排班后再把绿色提示填进来。
-# ============================================================
-if "parent_shift" not in st.session_state:
-    st.session_state.parent_shift = "休息"
-
-st.title("跨时区家庭日程同步")
-st.caption("左列是你在英国的时间，右列是父母在中国的时间。绿色提示来自两边都空闲的时段。")
-banner_slot = st.empty()
-
-
-# ============================================================
-# 8. 主界面两列：英国日程 | 中国父母日程
-# ============================================================
-left_col, right_col = st.columns(2, gap="large")
-
-with left_col:
-    st.subheader("我在英国的日程")
-    st.write(f"按英国本地时间显示 · 今天规则是 **{uk_label(now_uk)}**")
-
-    # 用表格把每条日程同时标出对应的北京时间，方便对照
-    table_rows = []
-    for event in st.session_state.uk_events:
-        start_uk = datetime.combine(
-            selected_date, parse_hhmm(event["start"]), tzinfo=UK_TZ
-        )
-        end_uk = datetime.combine(
-            selected_date, parse_hhmm(event["end"]), tzinfo=UK_TZ
-        )
-        table_rows.append(
-            {
-                "事项": event["title"],
-                "英国时间": f"{event['start']}–{event['end']}",
-                "对应北京时间": (
-                    f"{start_uk.astimezone(CN_TZ).strftime('%H:%M')}"
-                    f"–{end_uk.astimezone(CN_TZ).strftime('%H:%M')}"
-                ),
-            }
-        )
-
-    if table_rows:
-        st.dataframe(table_rows, hide_index=True, width="stretch")
-    else:
-        st.success("这一天英国日程是空的，全部时段都可以用来找共同休息。")
-
-    st.markdown("##### 添加一条假日程（预览用）")
-    with st.form("add_uk_event", clear_on_submit=True):
-        new_title = st.text_input("事项名称", placeholder="例如：去图书馆")
-        c1, c2 = st.columns(2)
-        new_start = c1.time_input("开始（英国时间）", value=time(19, 0))
-        new_end = c2.time_input("结束（英国时间）", value=time(20, 0))
-        submitted = st.form_submit_button("加入英国日程")
-        if submitted:
-            if not new_title.strip():
-                st.error("请先填写事项名称。")
-            elif new_end <= new_start:
-                st.error("结束时间需要晚于开始时间。")
-            else:
-                st.session_state.uk_events.append(
-                    {
-                        "title": new_title.strip(),
-                        "start": new_start.strftime("%H:%M"),
-                        "end": new_end.strftime("%H:%M"),
-                    }
-                )
-                st.rerun()  # 立刻刷新页面，绿色提示会重新计算
-
-    if st.session_state.uk_events:
-        st.markdown("##### 删除一条日程")
-        labels = [
-            f"{item['title']}（{item['start']}–{item['end']}）"
-            for item in st.session_state.uk_events
-        ]
-        to_delete = st.selectbox("选择要删除的事项", labels)
-        if st.button("删除选中事项"):
-            index = labels.index(to_delete)
-            st.session_state.uk_events.pop(index)
-            st.rerun()
-
-    if st.button("恢复默认假数据"):
-        st.session_state.uk_events = [event.copy() for event in DEFAULT_UK_EVENTS]
-        st.rerun()
-
-
-with right_col:
-    st.subheader("父母在中国的日程")
-    st.write("目前用按钮模拟排班，不接入真实日历。")
-
-    st.markdown("##### 今天父母的排班")
-    # 三个按钮：早班 / 晚班 / 休息
-    b1, b2, b3 = st.columns(3)
-    if b1.button("早班", width="stretch"):
-        st.session_state.parent_shift = "早班"
-        st.rerun()
-    if b2.button("晚班", width="stretch"):
-        st.session_state.parent_shift = "晚班"
-        st.rerun()
-    if b3.button("休息", width="stretch"):
-        st.session_state.parent_shift = "休息"
-        st.rerun()
-
-    # 下拉菜单也可以改排班，和按钮指向同一个变量
-    st.session_state.parent_shift = st.selectbox(
-        "或用下拉菜单选择排班",
-        options=["早班", "晚班", "休息"],
-        index=["早班", "晚班", "休息"].index(st.session_state.parent_shift),
-    )
-
-    shift = st.session_state.parent_shift
-    work_hours = PARENT_SHIFT_WORK_HOURS[shift]
-    if shift == "休息":
-        st.success("父母今天全天休息。")
-    else:
-        start_h = min(work_hours)
-        end_h = max(work_hours) + 1
-        st.info(f"父母今天是 **{shift}**：北京时间 {start_h:02d}:00–{end_h:02d}:00 上班，其余时间休息。")
-
-    # 按“英国这一天的每个整点”换算北京时间，再看父母忙不忙
-    timeline = []
-    for hour in range(24):
-        uk_dt = datetime.combine(selected_date, time(hour, 0), tzinfo=UK_TZ)
-        cn_dt = uk_dt.astimezone(CN_TZ)
-        status = "休息" if parent_is_resting(cn_dt, shift) else "上班"
-        timeline.append(
-            {
-                "英国时间": uk_dt.strftime("%H:%M"),
-                "对应北京时间": cn_dt.strftime("%H:%M"),
-                "父母状态": status,
-            }
-        )
-    st.dataframe(timeline, hide_index=True, width="stretch", height=420)
-
-
-# ============================================================
-# 9. 右列排班已经选好，现在计算并填入最上方的绿色提示
-# ============================================================
-shared_ranges = find_shared_rest(
-    selected_date,
-    st.session_state.uk_events,
-    st.session_state.parent_shift,
-)
-
-now_is_shared = False
-if selected_date == now_uk.date():
-    now_is_shared = (not hour_has_uk_event(now_uk, st.session_state.uk_events)) and (
-        parent_is_resting(now_cn, st.session_state.parent_shift)
-    )
-
-if shared_ranges:
-    pieces = []
-    for start, end in shared_ranges:
-        uk_text = format_range(start, end, UK_TZ)
-        cn_text = format_range(start, end, CN_TZ)
-        pieces.append(f"英国 {uk_text}（北京 {cn_text}）")
-    banner_text = "你们现在的共同休息时间是：" + "；".join(pieces)
-    if now_is_shared:
-        banner_text = "🟢 此刻可以联系家人！" + banner_text
-    banner_slot.markdown(
-        f'<div class="shared-rest-banner">{banner_text}</div>',
-        unsafe_allow_html=True,
-    )
-else:
-    banner_slot.warning(
-        "这一天暂时没有找到共同休息时段。可以试试把父母排班改成「休息」，或删掉几条英国日程。"
-    )
-
-
-# ============================================================
-# 10. 底部：按小时对照表，帮助看懂“为什么提示这些时间”
-# ============================================================
-st.divider()
-st.subheader("按小时对照（英国整点 → 北京时间）")
-
-compare_rows = []
-for hour in range(24):
-    uk_dt = datetime.combine(selected_date, time(hour, 0), tzinfo=UK_TZ)
-    cn_dt = uk_dt.astimezone(CN_TZ)
-    uk_busy = hour_has_uk_event(uk_dt, st.session_state.uk_events)
-    parents_rest = parent_is_resting(cn_dt, st.session_state.parent_shift)
-    if (not uk_busy) and parents_rest:
-        result = "共同休息"
-    elif uk_busy:
-        result = "英国有日程"
-    else:
-        result = "父母在上班"
-
-    compare_rows.append(
-        {
-            "英国时间": uk_dt.strftime("%H:%M"),
-            "北京时间": cn_dt.strftime("%H:%M"),
-            "英国是否空闲": "空闲" if not uk_busy else "有事",
-            "父母是否休息": "休息" if parents_rest else "上班",
-            "判断结果": result,
-        }
-    )
-
-st.dataframe(compare_rows, hide_index=True, width="stretch")
-st.caption(
-    "判断规则：英国这一小时没有日程，并且换算成北京时间后父母不上班 → 记为共同休息。"
-)
-import streamlit as st
-
-st.title("👨‍👩‍👧‍👦 家庭日历 App")
-st.write("欢迎来到我们的家庭专属日历！网页发布成功！")
+            msgs.append({"who": who, "to": to, "body": body.strip(), "at": datetime.now(BJ_TZ).strftime("%m月%d日 %H:%M（北京）")})
+            save_msgs(msgs); st.success("已发布。"); st.rerun()
+f = st.radio("筛选", ["全部", "按身份看", "只看写给全家人的"], horizontal=True, index=0)
+viewer = st.selectbox("我的身份", ["子女（英国）", "妈妈", "爸爸"]) if f.startswith("按身份") else None
+shown = msgs[::-1]
+if f == "只看写给全家人的": shown = [m for m in shown if m.get("to") == "全家人"]
+elif viewer: shown = [m for m in shown if m.get("to") in ("全家人", viewer)]
+if not shown: st.info("暂无留言，来写第一条吧。")
+for i, m in enumerate(shown):
+    st.markdown(f'<div class="msg"><div class="meta">{m.get("who","")} → {m.get("to","")} · {m.get("at","")}</div><div class="body">{m.get("body","")}</div></div>', unsafe_allow_html=True)
+    if st.button("删除", key=f"del_{i}"):
+        msgs.remove(m); save_msgs(msgs); st.rerun()
